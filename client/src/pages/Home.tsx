@@ -1,23 +1,25 @@
 /**
  * Neo-Brutalist Document Lab - PDF to Markdown Converter
- * Design: Bold geometric shapes, 4px borders, electric lime accents
+ * Design: Bold geometric shapes, 4px borders, Bubblegum Pink accents
  * Typography: Space Grotesk (headlines), IBM Plex Mono (technical)
  */
 
 import { useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { FileUp, FileText, Image, Download, Trash2, CheckCircle, AlertCircle, Loader2 } from "lucide-react";
+import { FileUp, FileText, Image, Download, Trash2, CheckCircle, AlertCircle, Loader2, Clock, Link2, Eye, Code } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
+import { Link } from "wouter";
+import { Streamdown } from "streamdown";
 
 interface ConversionResult {
+  conversionId: string;
   markdown: string;
-  images: { name: string; url: string }[];
-  metadata: {
-    totalPages: number;
-    figuresExtracted: number;
-    conversionMethod: string;
-  };
+  images: { name: string; url: string; pageNumber: number }[];
+  totalPages: number;
+  figuresExtracted: number;
+  conversionMethod: string;
+  figureQuestionLinks: { figureId: string; questionNumber: string; pageNumber: number; confidence: number }[];
 }
 
 interface ProcessingStatus {
@@ -32,25 +34,28 @@ export default function Home() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [status, setStatus] = useState<ProcessingStatus | null>(null);
   const [result, setResult] = useState<ConversionResult | null>(null);
+  const [previewMode, setPreviewMode] = useState<"rendered" | "raw">("rendered");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // tRPC mutation for PDF conversion
   const convertMutation = trpc.pdf.convert.useMutation({
     onSuccess: (data) => {
       setResult({
+        conversionId: data.conversionId,
         markdown: data.markdown,
         images: data.images,
-        metadata: {
-          totalPages: data.totalPages,
-          figuresExtracted: data.figuresExtracted,
-          conversionMethod: data.conversionMethod,
-        },
+        totalPages: data.totalPages,
+        figuresExtracted: data.figuresExtracted,
+        conversionMethod: data.conversionMethod,
+        figureQuestionLinks: data.figureQuestionLinks,
       });
       setIsProcessing(false);
+      setStatus({ stage: "complete", progress: 100, message: "Conversion complete!" });
       toast.success("PDF converted successfully!");
     },
     onError: (error) => {
       setIsProcessing(false);
+      setStatus(null);
       toast.error(`Conversion failed: ${error.message}`);
     },
   });
@@ -121,8 +126,6 @@ export default function Home() {
       });
     };
     reader.readAsDataURL(file);
-
-    setStatus({ stage: "complete", progress: 100, message: "Conversion complete!" });
   };
 
   const handleDownloadMarkdown = () => {
@@ -150,7 +153,7 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="min-h-screen bg-background flex flex-col">
       {/* Header */}
       <header className="brutal-border border-t-0 border-x-0 bg-card">
         <div className="container py-4">
@@ -164,17 +167,25 @@ export default function Home() {
                 <p className="text-sm font-mono text-muted-foreground">DOCUMENT LAB v1.0</p>
               </div>
             </div>
-            <div className="hidden sm:flex items-center gap-2 font-mono text-sm">
-              <span className="px-3 py-1 bg-primary text-primary-foreground brutal-border text-xs font-semibold">
-                DOCLING + TESSERACT
-              </span>
+            <div className="flex items-center gap-3">
+              <Link href="/history">
+                <Button variant="outline" className="brutal-btn bg-card">
+                  <Clock className="w-4 h-4 mr-2" />
+                  History
+                </Button>
+              </Link>
+              <div className="hidden sm:flex items-center gap-2 font-mono text-sm">
+                <span className="px-3 py-1 bg-primary text-primary-foreground brutal-border text-xs font-semibold">
+                  DOCLING + TESSERACT
+                </span>
+              </div>
             </div>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <main className="container py-8">
+      <main className="container py-8 flex-1">
         <div className="grid lg:grid-cols-5 gap-6">
           {/* Upload Zone - 3 columns */}
           <div className="lg:col-span-3">
@@ -246,7 +257,7 @@ export default function Home() {
                 <Button
                   onClick={handleConvert}
                   disabled={!file || isProcessing}
-                  className="w-full brutal-btn bg-primary text-primary-foreground hover:bg-[#9ACC00] py-6 text-lg font-bold"
+                  className="w-full brutal-btn bg-primary text-primary-foreground hover:bg-[#E05A6D] py-6 text-lg font-bold"
                 >
                   {isProcessing ? (
                     <>
@@ -311,12 +322,17 @@ export default function Home() {
                   <>
                     <StatusItem 
                       label="Pages" 
-                      value={result.metadata.totalPages.toString()} 
+                      value={result.totalPages.toString()} 
                       active
                     />
                     <StatusItem 
                       label="Figures" 
-                      value={result.metadata.figuresExtracted.toString()} 
+                      value={result.figuresExtracted.toString()} 
+                      active
+                    />
+                    <StatusItem 
+                      label="Links" 
+                      value={result.figureQuestionLinks.length.toString()} 
                       active
                     />
                   </>
@@ -338,16 +354,40 @@ export default function Home() {
                   {/* Download Markdown */}
                   <Button
                     onClick={handleDownloadMarkdown}
-                    className="w-full brutal-btn bg-primary text-primary-foreground hover:bg-[#9ACC00]"
+                    className="w-full brutal-btn bg-primary text-primary-foreground hover:bg-[#E05A6D]"
                   >
                     <Download className="w-4 h-4 mr-2" />
                     DOWNLOAD .MD
                   </Button>
 
+                  {/* Figure-Question Links */}
+                  {result.figureQuestionLinks.length > 0 && (
+                    <div>
+                      <p className="font-mono text-sm text-muted-foreground mb-2 flex items-center gap-1">
+                        <Link2 className="w-3 h-3" />
+                        FIGURE-QUESTION LINKS ({result.figureQuestionLinks.length})
+                      </p>
+                      <div className="space-y-1 max-h-32 overflow-y-auto">
+                        {result.figureQuestionLinks.map((link, idx) => (
+                          <div 
+                            key={idx}
+                            className="flex items-center justify-between p-2 bg-primary/10 brutal-border border-2 font-mono text-xs"
+                          >
+                            <span>Q{link.questionNumber} → {link.figureId}</span>
+                            <span className="text-muted-foreground">
+                              {Math.round(link.confidence * 100)}%
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Extracted Images */}
                   {result.images.length > 0 && (
                     <div>
-                      <p className="font-mono text-sm text-muted-foreground mb-2">
+                      <p className="font-mono text-sm text-muted-foreground mb-2 flex items-center gap-1">
+                        <Image className="w-3 h-3" />
                         EXTRACTED FIGURES ({result.images.length})
                       </p>
                       <div className="space-y-2 max-h-40 overflow-y-auto">
@@ -358,6 +398,7 @@ export default function Home() {
                           >
                             <Image className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                             <span className="font-mono text-sm truncate">{img.name}</span>
+                            <span className="font-mono text-xs text-muted-foreground ml-auto">p.{img.pageNumber}</span>
                           </div>
                         ))}
                       </div>
@@ -387,12 +428,41 @@ export default function Home() {
         {result && (
           <div className="mt-8">
             <div className="brutal-card p-6">
-              <h2 className="text-lg font-bold mb-4 flex items-center gap-2">
-                <span className="w-8 h-8 bg-[#1A1A1A] text-[#F5F5F0] flex items-center justify-center text-sm font-mono">03</span>
-                PREVIEW
-              </h2>
-              <div className="bg-muted brutal-border p-4 max-h-96 overflow-auto">
-                <pre className="font-mono text-sm whitespace-pre-wrap">{result.markdown}</pre>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-lg font-bold flex items-center gap-2">
+                  <span className="w-8 h-8 bg-[#1A1A1A] text-[#F5F5F0] flex items-center justify-center text-sm font-mono">03</span>
+                  PREVIEW
+                </h2>
+                <div className="flex items-center gap-2">
+                  <Button
+                    variant={previewMode === "rendered" ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setPreviewMode("rendered")}
+                    className={`brutal-btn ${previewMode === "rendered" ? "bg-primary text-primary-foreground" : "bg-card"}`}
+                  >
+                    <Eye className="w-4 h-4 mr-1" />
+                    Rendered
+                  </Button>
+                  <Button
+                    variant={previewMode === "raw" ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setPreviewMode("raw")}
+                    className={`brutal-btn ${previewMode === "raw" ? "bg-primary text-primary-foreground" : "bg-card"}`}
+                  >
+                    <Code className="w-4 h-4 mr-1" />
+                    Raw
+                  </Button>
+                </div>
+              </div>
+              
+              <div className="bg-muted brutal-border p-4 max-h-[500px] overflow-auto">
+                {previewMode === "rendered" ? (
+                  <div className="prose prose-sm max-w-none prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-li:my-0">
+                    <Streamdown>{result.markdown}</Streamdown>
+                  </div>
+                ) : (
+                  <pre className="font-mono text-sm whitespace-pre-wrap">{result.markdown}</pre>
+                )}
               </div>
             </div>
           </div>

@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
+import { eq, desc, and, isNull, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users } from "../drizzle/schema";
+import { InsertUser, users, conversions, InsertConversion, Conversion } from "../drizzle/schema";
 import { ENV } from './_core/env';
 
 let _db: ReturnType<typeof drizzle> | null = null;
@@ -89,4 +89,144 @@ export async function getUserByOpenId(openId: string) {
   return result.length > 0 ? result[0] : undefined;
 }
 
-// TODO: add feature queries here as your schema grows.
+// ============================================
+// Conversion History Queries
+// ============================================
+
+/**
+ * Create a new conversion record
+ */
+export async function createConversion(conversion: InsertConversion): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot create conversion: database not available");
+    return;
+  }
+
+  await db.insert(conversions).values(conversion);
+}
+
+/**
+ * Get a conversion by its unique conversionId
+ */
+export async function getConversionById(conversionId: string): Promise<Conversion | undefined> {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot get conversion: database not available");
+    return undefined;
+  }
+
+  const result = await db
+    .select()
+    .from(conversions)
+    .where(eq(conversions.conversionId, conversionId))
+    .limit(1);
+
+  return result.length > 0 ? result[0] : undefined;
+}
+
+/**
+ * Update a conversion record
+ */
+export async function updateConversion(
+  conversionId: string,
+  updates: Partial<InsertConversion>
+): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot update conversion: database not available");
+    return;
+  }
+
+  await db
+    .update(conversions)
+    .set(updates)
+    .where(eq(conversions.conversionId, conversionId));
+}
+
+/**
+ * Get conversion history for a user (or all public conversions if no userId)
+ */
+export async function getConversionHistory(
+  userId?: number,
+  limit: number = 20,
+  offset: number = 0
+): Promise<Conversion[]> {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot get conversion history: database not available");
+    return [];
+  }
+
+  // If userId provided, get user's conversions; otherwise get anonymous conversions
+  const whereClause = userId 
+    ? eq(conversions.userId, userId)
+    : isNull(conversions.userId);
+
+  const result = await db
+    .select()
+    .from(conversions)
+    .where(whereClause)
+    .orderBy(desc(conversions.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  return result;
+}
+
+/**
+ * Get all conversions (for admin or public listing)
+ */
+export async function getAllConversions(
+  limit: number = 50,
+  offset: number = 0
+): Promise<Conversion[]> {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot get all conversions: database not available");
+    return [];
+  }
+
+  const result = await db
+    .select()
+    .from(conversions)
+    .orderBy(desc(conversions.createdAt))
+    .limit(limit)
+    .offset(offset);
+
+  return result;
+}
+
+/**
+ * Delete a conversion by ID (for cleanup or user request)
+ */
+export async function deleteConversion(conversionId: string): Promise<void> {
+  const db = await getDb();
+  if (!db) {
+    console.warn("[Database] Cannot delete conversion: database not available");
+    return;
+  }
+
+  await db.delete(conversions).where(eq(conversions.conversionId, conversionId));
+}
+
+/**
+ * Count total conversions for a user
+ */
+export async function countUserConversions(userId?: number): Promise<number> {
+  const db = await getDb();
+  if (!db) {
+    return 0;
+  }
+
+  const whereClause = userId 
+    ? eq(conversions.userId, userId)
+    : isNull(conversions.userId);
+
+  const result = await db
+    .select()
+    .from(conversions)
+    .where(whereClause);
+
+  return result.length;
+}
