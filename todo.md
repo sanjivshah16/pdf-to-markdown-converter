@@ -27,3 +27,5 @@
 ## Bug Fixes
 
 - [x] Fix real OCR processing - now uses PyMuPDF + Tesseract hybrid approach
+- [x] Fix __dirname ES module compatibility error
+- [x] Fix JSON parsing error (Python returning HTML instead of JSON)

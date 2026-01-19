@@ -6,8 +6,13 @@
 import { spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import { fileURLToPath } from "url";
 import { nanoid } from "nanoid";
 import { storagePut } from "./storage";
+
+// ES module compatibility - get __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export interface ConversionResult {
   conversionId: string;
@@ -125,26 +130,24 @@ async function executePythonConverter(
   onProgress?: (progress: ProcessingProgress) => void
 ): Promise<PythonConverterResult> {
   return new Promise((resolve, reject) => {
-    // Get the script path - it's in the same directory as this file
-    const scriptPath = path.resolve(__dirname, "pdf_converter.py");
+    // Find the script path - try multiple locations
+    const possiblePaths = [
+      path.resolve(__dirname, "pdf_converter.py"),
+      path.resolve(process.cwd(), "server", "pdf_converter.py"),
+      "/home/ubuntu/pdf-to-markdown-converter/server/pdf_converter.py",
+    ];
     
-    // Check if script exists, if not try the server directory
-    let actualScriptPath = scriptPath;
-    if (!fs.existsSync(scriptPath)) {
-      // Try relative to project root
-      const altPath = path.resolve(process.cwd(), "server", "pdf_converter.py");
-      if (fs.existsSync(altPath)) {
-        actualScriptPath = altPath;
-      } else {
-        // Try one more location
-        const altPath2 = "/home/ubuntu/pdf-to-markdown-converter/server/pdf_converter.py";
-        if (fs.existsSync(altPath2)) {
-          actualScriptPath = altPath2;
-        } else {
-          reject(new Error(`PDF converter script not found at ${scriptPath}, ${altPath}, or ${altPath2}`));
-          return;
-        }
+    let actualScriptPath: string | null = null;
+    for (const scriptPath of possiblePaths) {
+      if (fs.existsSync(scriptPath)) {
+        actualScriptPath = scriptPath;
+        break;
       }
+    }
+    
+    if (!actualScriptPath) {
+      reject(new Error(`PDF converter script not found. Tried: ${possiblePaths.join(", ")}`));
+      return;
     }
 
     console.log(`[PDF Processor] Using script: ${actualScriptPath}`);
@@ -289,7 +292,7 @@ async function executePythonConverter(
           figures,
           totalPages: metadata.total_pages || totalPages || Math.max(...figures.map(f => f.page), 0),
           figuresExtracted: embeddedFigures.length,
-          conversionMethod: "Tesseract OCR",
+          conversionMethod: "PyMuPDF + Tesseract OCR",
           figureQuestionLinks
         });
       } catch (error) {
@@ -324,101 +327,80 @@ async function uploadImagesToS3(
 
       const imageBuffer = fs.readFileSync(imagePath);
       const ext = path.extname(figure.filename).toLowerCase();
-      const contentType = ext === ".png" ? "image/png" : 
-                         ext === ".jpg" || ext === ".jpeg" ? "image/jpeg" : 
-                         "image/png";
-
-      const s3Key = `conversions/${conversionId}/images/${figure.filename}`;
-      const { url } = await storagePut(s3Key, imageBuffer, contentType);
-
+      const contentType = ext === ".png" ? "image/png" : "image/jpeg";
+      
+      const imageKey = `conversions/${conversionId}/images/${figure.filename}`;
+      const { url } = await storagePut(imageKey, imageBuffer, contentType);
+      
       uploadedImages.push({
         name: figure.filename,
         url,
         pageNumber: figure.page
       });
     } catch (error) {
-      console.error(`Failed to upload image ${figure.filename}:`, error);
+      console.error(`[PDF Processor] Failed to upload image ${figure.filename}:`, error);
     }
   }
-
+  
   return uploadedImages;
 }
 
 /**
- * Enhanced figure-question linking with proximity analysis
+ * Link figures to questions based on proximity and content analysis
+ * This is a heuristic-based approach that can be improved with ML
  */
 export function linkFiguresToQuestions(
   markdown: string,
-  figures: Array<{ name: string; pageNumber: number }>
-): Array<{
-  figureId: string;
-  questionNumber: string;
-  pageNumber: number;
-  confidence: number;
-}> {
-  const links: Array<{
-    figureId: string;
-    questionNumber: string;
-    pageNumber: number;
-    confidence: number;
-  }> = [];
-
-  // Keywords that indicate a question references a figure
-  const figureKeywords = [
-    'figure', 'graph', 'diagram', 'shown', 'below', 'above',
-    'image', 'chart', 'table', 'illustration', 'picture',
-    'as shown', 'in the figure', 'following figure', 'refer to',
-    'based on', 'according to the', 'use the following'
-  ];
-
-  // Extract questions with their page context
-  const pagePattern = /## Page (\d+)([\s\S]*?)(?=## Page \d+|$)/g;
-  const questionPattern = /\*\*(\d+)\.\*\*\s*([\s\S]*?)(?=\*\*\d+\.\*\*|$)/g;
-
-  let pageMatch;
-  while ((pageMatch = pagePattern.exec(markdown)) !== null) {
-    const pageNum = parseInt(pageMatch[1]);
-    const pageContent = pageMatch[2];
-
-    let questionMatch;
-    while ((questionMatch = questionPattern.exec(pageContent)) !== null) {
-      const questionNum = questionMatch[1];
-      const questionText = questionMatch[2].toLowerCase();
-
-      // Check if question references a figure
-      const referencesFigure = figureKeywords.some(kw => questionText.includes(kw));
-
-      if (referencesFigure) {
-        // Find figures on the same page or adjacent pages
-        const nearbyFigures = figures.filter(fig => 
-          Math.abs(fig.pageNumber - pageNum) <= 1
-        );
-
-        for (const fig of nearbyFigures) {
-          // Calculate confidence based on proximity
-          const pageDistance = Math.abs(fig.pageNumber - pageNum);
-          const confidence = pageDistance === 0 ? 0.95 : 0.75;
-
-          links.push({
-            figureId: fig.name,
-            questionNumber: questionNum,
-            pageNumber: fig.pageNumber,
-            confidence
-          });
+  images: ConversionResult["images"]
+): ConversionResult["figureQuestionLinks"] {
+  const links: ConversionResult["figureQuestionLinks"] = [];
+  
+  // Find all question numbers in the markdown
+  const questionPattern = /\*\*(\d+)\.\*\*/g;
+  const questions: Array<{ number: string; position: number }> = [];
+  
+  let match;
+  while ((match = questionPattern.exec(markdown)) !== null) {
+    questions.push({
+      number: match[1],
+      position: match.index
+    });
+  }
+  
+  // For each image, find the nearest question
+  for (const image of images) {
+    // Find image reference in markdown
+    const imagePattern = new RegExp(`!\\[.*?\\]\\(.*?${image.name}.*?\\)`, 'g');
+    const imageMatch = imagePattern.exec(markdown);
+    
+    if (imageMatch) {
+      const imagePosition = imageMatch.index;
+      
+      // Find the closest question before this image
+      let closestQuestion: { number: string; distance: number } | null = null;
+      
+      for (const q of questions) {
+        if (q.position < imagePosition) {
+          const distance = imagePosition - q.position;
+          if (!closestQuestion || distance < closestQuestion.distance) {
+            closestQuestion = { number: q.number, distance };
+          }
         }
+      }
+      
+      if (closestQuestion && closestQuestion.distance < 5000) {
+        // Calculate confidence based on distance
+        const confidence = Math.max(0.5, 1 - (closestQuestion.distance / 5000));
+        
+        links.push({
+          figureId: image.name,
+          questionNumber: closestQuestion.number,
+          pageNumber: image.pageNumber,
+          confidence: Math.round(confidence * 100) / 100
+        });
       }
     }
   }
-
-  // Remove duplicates and keep highest confidence
-  const uniqueLinks = new Map<string, typeof links[0]>();
-  for (const link of links) {
-    const key = `${link.figureId}-${link.questionNumber}`;
-    const existing = uniqueLinks.get(key);
-    if (!existing || existing.confidence < link.confidence) {
-      uniqueLinks.set(key, link);
-    }
-  }
-
-  return Array.from(uniqueLinks.values());
+  
+  return links;
 }

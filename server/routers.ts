@@ -171,8 +171,9 @@ const pdfRouter = router({
       }
 
       // Re-run figure-question linking
-      const figures = (conversion.images as Array<{ name: string; pageNumber: number }>).map(img => ({
+      const figures = (conversion.images as Array<{ name: string; url: string; pageNumber: number }>).map(img => ({
         name: img.name,
+        url: img.url || '',
         pageNumber: img.pageNumber || 0,
       }));
 
