@@ -7,7 +7,7 @@ import { spawn } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
 import { nanoid } from "nanoid";
-import { storagePut, storageGet } from "./storage";
+import { storagePut } from "./storage";
 
 export interface ConversionResult {
   conversionId: string;
@@ -34,6 +34,9 @@ export interface ProcessingProgress {
   progress: number;
   message: string;
 }
+
+// Timeout for Python processing (10 minutes for large PDFs)
+const PYTHON_TIMEOUT_MS = 600000;
 
 /**
  * Process a PDF file using the Python OCR converter
@@ -122,34 +125,63 @@ async function executePythonConverter(
   onProgress?: (progress: ProcessingProgress) => void
 ): Promise<PythonConverterResult> {
   return new Promise((resolve, reject) => {
-    const scriptPath = path.join(__dirname, "pdf_converter.py");
+    // Get the script path - it's in the same directory as this file
+    const scriptPath = path.resolve(__dirname, "pdf_converter.py");
     
-    // Check if script exists
+    // Check if script exists, if not try the server directory
+    let actualScriptPath = scriptPath;
     if (!fs.existsSync(scriptPath)) {
-      reject(new Error("PDF converter script not found"));
-      return;
+      // Try relative to project root
+      const altPath = path.resolve(process.cwd(), "server", "pdf_converter.py");
+      if (fs.existsSync(altPath)) {
+        actualScriptPath = altPath;
+      } else {
+        // Try one more location
+        const altPath2 = "/home/ubuntu/pdf-to-markdown-converter/server/pdf_converter.py";
+        if (fs.existsSync(altPath2)) {
+          actualScriptPath = altPath2;
+        } else {
+          reject(new Error(`PDF converter script not found at ${scriptPath}, ${altPath}, or ${altPath2}`));
+          return;
+        }
+      }
     }
 
+    console.log(`[PDF Processor] Using script: ${actualScriptPath}`);
+    console.log(`[PDF Processor] Input PDF: ${pdfPath}`);
+    console.log(`[PDF Processor] Output dir: ${outputDir}`);
+
     const pythonProcess = spawn("python3", [
-      scriptPath,
+      actualScriptPath,
       pdfPath,
       "-o", outputDir,
       "-m", "tesseract"
-    ]);
+    ], {
+      env: { ...process.env },
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
 
     let stdout = "";
     let stderr = "";
+    let totalPages = 0;
     let currentPage = 0;
+
+    // Set timeout
+    const timeout = setTimeout(() => {
+      pythonProcess.kill('SIGTERM');
+      reject(new Error(`Python converter timed out after ${PYTHON_TIMEOUT_MS / 1000} seconds`));
+    }, PYTHON_TIMEOUT_MS);
 
     pythonProcess.stdout.on("data", (data) => {
       const output = data.toString();
       stdout += output;
+      console.log(`[Python stdout] ${output.trim()}`);
       
       // Parse progress from output
       const pageMatch = output.match(/Processing page (\d+)\/(\d+)/);
       if (pageMatch) {
         currentPage = parseInt(pageMatch[1]);
-        const totalPages = parseInt(pageMatch[2]);
+        totalPages = parseInt(pageMatch[2]);
         const progress = Math.round(20 + (currentPage / totalPages) * 50);
         onProgress?.({
           stage: "ocr",
@@ -157,14 +189,30 @@ async function executePythonConverter(
           message: `Processing page ${currentPage} of ${totalPages}...`
         });
       }
+      
+      // Check for figure extraction
+      const figureMatch = output.match(/Extracted (\d+) embedded figures/);
+      if (figureMatch) {
+        onProgress?.({
+          stage: "figures",
+          progress: 15,
+          message: `Extracted ${figureMatch[1]} figures...`
+        });
+      }
     });
 
     pythonProcess.stderr.on("data", (data) => {
-      stderr += data.toString();
+      const output = data.toString();
+      stderr += output;
+      console.error(`[Python stderr] ${output.trim()}`);
     });
 
     pythonProcess.on("close", (code) => {
+      clearTimeout(timeout);
+      
       if (code !== 0) {
+        console.error(`[PDF Processor] Python exited with code ${code}`);
+        console.error(`[PDF Processor] stderr: ${stderr}`);
         reject(new Error(`Python converter failed with code ${code}: ${stderr}`));
         return;
       }
@@ -176,21 +224,36 @@ async function executePythonConverter(
         const metadataPath = `${outputDir}/${baseName}_metadata.json`;
         const imagesDir = `${outputDir}/images`;
 
+        console.log(`[PDF Processor] Looking for markdown at: ${markdownPath}`);
+        console.log(`[PDF Processor] Looking for metadata at: ${metadataPath}`);
+
         // Read markdown content
-        const markdown = fs.existsSync(markdownPath)
-          ? fs.readFileSync(markdownPath, "utf-8")
-          : "";
+        let markdown = "";
+        if (fs.existsSync(markdownPath)) {
+          markdown = fs.readFileSync(markdownPath, "utf-8");
+          console.log(`[PDF Processor] Markdown file size: ${markdown.length} chars`);
+        } else {
+          console.error(`[PDF Processor] Markdown file not found at ${markdownPath}`);
+          // List directory contents for debugging
+          if (fs.existsSync(outputDir)) {
+            const files = fs.readdirSync(outputDir);
+            console.log(`[PDF Processor] Output directory contents: ${files.join(", ")}`);
+          }
+        }
 
         // Read metadata
-        let metadata: any = { figures: [], question_figure_map: {} };
+        let metadata: any = { figures: [], question_figure_map: {}, total_pages: 0 };
         if (fs.existsSync(metadataPath)) {
           metadata = JSON.parse(fs.readFileSync(metadataPath, "utf-8"));
+          console.log(`[PDF Processor] Metadata loaded: ${metadata.figures?.length || 0} figures`);
         }
 
         // List image files
         const figures: PythonConverterResult["figures"] = [];
         if (fs.existsSync(imagesDir)) {
           const imageFiles = fs.readdirSync(imagesDir);
+          console.log(`[PDF Processor] Found ${imageFiles.length} image files`);
+          
           for (const file of imageFiles) {
             const pageMatch = file.match(/page(\d+)/);
             figures.push({
@@ -224,7 +287,7 @@ async function executePythonConverter(
         resolve({
           markdown,
           figures,
-          totalPages: Math.max(...figures.map(f => f.page), 0),
+          totalPages: metadata.total_pages || totalPages || Math.max(...figures.map(f => f.page), 0),
           figuresExtracted: embeddedFigures.length,
           conversionMethod: "Tesseract OCR",
           figureQuestionLinks
@@ -235,6 +298,7 @@ async function executePythonConverter(
     });
 
     pythonProcess.on("error", (error) => {
+      clearTimeout(timeout);
       reject(new Error(`Failed to start Python process: ${error.message}`));
     });
   });

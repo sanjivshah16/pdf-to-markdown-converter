@@ -57,14 +57,8 @@ const pdfRouter = router({
         });
 
         // Process the PDF using Python OCR
-        let result;
-        try {
-          result = await processPDF(pdfBuffer, filename);
-        } catch (processingError) {
-          // If Python processing fails, use simulated result for demo
-          console.warn("Python processing failed, using simulated result:", processingError);
-          result = generateSimulatedResult(conversionId, filename);
-        }
+        console.log(`[PDF Router] Starting conversion for ${filename}`);
+        const result = await processPDF(pdfBuffer, filename);
 
         // Store markdown in S3
         const markdownKey = `conversions/${conversionId}/output.md`;
@@ -195,74 +189,6 @@ const pdfRouter = router({
     }),
 });
 
-/**
- * Generate simulated conversion result for demo purposes
- */
-function generateSimulatedResult(conversionId: string, filename: string) {
-  const baseName = filename.replace('.pdf', '');
-  
-  return {
-    markdown: `# ${baseName}
-
-**Source:** ${filename}  
-**Total Pages:** 12  
-**Figures Extracted:** 8  
-**Conversion Method:** Tesseract OCR
-
----
-
-## Page 1
-
-This is sample converted content from your PDF document. The actual conversion processes your document using Docling and Tesseract OCR to extract text from scanned pages.
-
-### Section 1.1
-
-The converter handles two-column layouts by processing each column separately, ensuring proper reading order is maintained.
-
-**1.** Sample question text would appear here with proper formatting.
-
-- **A.** Option A
-- **B.** Option B
-- **C.** Option C
-- **D.** Option D
-
----
-
-## Page 2
-
-**2.** Another sample question referencing the figure shown below.
-
-- **A.** First choice
-- **B.** Second choice
-- **C.** Third choice
-- **D.** Fourth choice
-
----
-
-## Extracted Figures
-
-### Page 3
-
-![Figure from page 3](images/page3_img1.jpeg)
-
-### Page 7
-
-![Figure from page 7](images/page7_img1.jpeg)
-`,
-    images: [
-      { name: "page3_img1.jpeg", url: `https://storage.example.com/${conversionId}/page3_img1.jpeg`, pageNumber: 3 },
-      { name: "page7_img1.jpeg", url: `https://storage.example.com/${conversionId}/page7_img1.jpeg`, pageNumber: 7 },
-      { name: "page12_img1.jpeg", url: `https://storage.example.com/${conversionId}/page12_img1.jpeg`, pageNumber: 12 },
-    ],
-    totalPages: 12,
-    figuresExtracted: 8,
-    conversionMethod: "Tesseract OCR",
-    figureQuestionLinks: [
-      { figureId: "page3_img1.jpeg", questionNumber: "2", pageNumber: 3, confidence: 0.85 },
-      { figureId: "page7_img1.jpeg", questionNumber: "15", pageNumber: 7, confidence: 0.90 },
-    ],
-  };
-}
 
 export const appRouter = router({
   // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly

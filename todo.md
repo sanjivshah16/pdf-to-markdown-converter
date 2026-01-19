@@ -23,3 +23,7 @@
 - [x] Write tests for all new features
 - [x] Update color scheme from lime green to Bubblegum Pink (#EF798A)
 - [x] Add live rendered markdown preview (not just raw text)
+
+## Bug Fixes
+
+- [x] Fix real OCR processing - now uses PyMuPDF + Tesseract hybrid approach

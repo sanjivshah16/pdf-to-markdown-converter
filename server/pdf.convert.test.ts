@@ -56,9 +56,26 @@ vi.mock("./db", () => ({
   countUserConversions: vi.fn().mockResolvedValue(2),
 }));
 
-// Mock the pdfProcessor module
+// Mock the pdfProcessor module with successful response
 vi.mock("./pdfProcessor", () => ({
-  processPDF: vi.fn().mockRejectedValue(new Error("Python not available in test")),
+  processPDF: vi.fn().mockImplementation(async (buffer: Buffer, filename: string) => {
+    const baseName = filename.replace('.pdf', '');
+    return {
+      conversionId: `mock-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+      markdown: `# ${baseName}\n\n**Source:** ${filename}\n**Total Pages:** 12\n**Figures Extracted:** 8\n\n## Page 1\n\nSample content from ${filename}`,
+      images: [
+        { name: "page3_img1.jpeg", url: `https://example.com/page3_img1.jpeg`, pageNumber: 3 },
+        { name: "page7_img1.jpeg", url: `https://example.com/page7_img1.jpeg`, pageNumber: 7 },
+      ],
+      totalPages: 12,
+      figuresExtracted: 8,
+      conversionMethod: "PyMuPDF + Tesseract OCR",
+      figureQuestionLinks: [
+        { figureId: "page3_img1.jpeg", questionNumber: "2", pageNumber: 3, confidence: 0.85 },
+        { figureId: "page7_img1.jpeg", questionNumber: "15", pageNumber: 7, confidence: 0.90 },
+      ],
+    };
+  }),
   linkFiguresToQuestions: vi.fn().mockReturnValue([
     { figureId: "img1.jpg", questionNumber: "1", pageNumber: 1, confidence: 0.95 },
   ]),
@@ -129,10 +146,10 @@ describe("pdf.convert", () => {
     // Verify markdown contains the filename
     expect(result.markdown).toContain("test-document");
 
-    // Verify metadata values (simulated result)
+    // Verify metadata values
     expect(result.totalPages).toBe(12);
     expect(result.figuresExtracted).toBe(8);
-    expect(result.conversionMethod).toBe("Tesseract OCR");
+    expect(result.conversionMethod).toBe("PyMuPDF + Tesseract OCR");
 
     // Verify images array structure
     expect(Array.isArray(result.images)).toBe(true);
