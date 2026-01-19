@@ -1,232 +1,174 @@
-import { eq, desc, and, isNull, or } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
-import { InsertUser, users, conversions, InsertConversion, Conversion } from "../drizzle/schema";
-import { ENV } from './_core/env';
+// Local JSON file-based database for PDF converter
+// No external database required - stores everything in a local JSON file
 
-let _db: ReturnType<typeof drizzle> | null = null;
+import * as fs from "fs";
+import * as path from "path";
+import { fileURLToPath } from "url";
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
-export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
-    try {
-      _db = drizzle(process.env.DATABASE_URL);
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      _db = null;
-    }
-  }
-  return _db;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Database types (simplified from drizzle schema)
+export interface Conversion {
+  id: number;
+  conversionId: string;
+  userId: number | null;
+  filename: string;
+  pdfKey: string | null;
+  pdfUrl: string | null;
+  markdownKey: string | null;
+  markdownUrl: string | null;
+  markdownContent: string | null;
+  status: "pending" | "processing" | "completed" | "failed";
+  totalPages: number | null;
+  figuresExtracted: number | null;
+  conversionMethod: string | null;
+  fileSize: number | null;
+  errorMessage: string | null;
+  images: Array<{ name: string; url: string; pageNumber: number; linkedQuestion?: string }> | null;
+  figureQuestionLinks: Array<{ figureId: string; questionNumber: string; pageNumber: number; confidence: number }> | null;
+  createdAt: Date;
+  updatedAt: Date;
+  completedAt: Date | null;
 }
 
-export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) {
-    throw new Error("User openId is required for upsert");
-  }
+export type InsertConversion = Partial<Conversion> & {
+  conversionId: string;
+  filename: string;
+};
 
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot upsert user: database not available");
-    return;
-  }
+interface Database {
+  conversions: Conversion[];
+  nextId: number;
+}
 
+// Database file path
+const DB_PATH = process.env.DB_PATH || path.resolve(__dirname, "..", "local-db.json");
+
+function loadDb(): Database {
   try {
-    const values: InsertUser = {
-      openId: user.openId,
-    };
-    const updateSet: Record<string, unknown> = {};
-
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
-
-    const assignNullable = (field: TextField) => {
-      const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
-
-    textFields.forEach(assignNullable);
-
-    if (user.lastSignedIn !== undefined) {
-      values.lastSignedIn = user.lastSignedIn;
-      updateSet.lastSignedIn = user.lastSignedIn;
+    if (fs.existsSync(DB_PATH)) {
+      const data = JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
+      // Convert date strings back to Date objects
+      data.conversions = data.conversions.map((c: any) => ({
+        ...c,
+        createdAt: new Date(c.createdAt),
+        updatedAt: new Date(c.updatedAt),
+        completedAt: c.completedAt ? new Date(c.completedAt) : null,
+      }));
+      return data;
     }
-    if (user.role !== undefined) {
-      values.role = user.role;
-      updateSet.role = user.role;
-    } else if (user.openId === ENV.ownerOpenId) {
-      values.role = 'admin';
-      updateSet.role = 'admin';
-    }
-
-    if (!values.lastSignedIn) {
-      values.lastSignedIn = new Date();
-    }
-
-    if (Object.keys(updateSet).length === 0) {
-      updateSet.lastSignedIn = new Date();
-    }
-
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
-      set: updateSet,
-    });
   } catch (error) {
-    console.error("[Database] Failed to upsert user:", error);
-    throw error;
+    console.warn("[Database] Failed to load database, creating new one:", error);
   }
+  return { conversions: [], nextId: 1 };
 }
 
-export async function getUserByOpenId(openId: string) {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get user: database not available");
-    return undefined;
-  }
+function saveDb(db: Database): void {
+  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
+}
 
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+// User functions (simplified - no actual user management needed for local use)
+export async function upsertUser(): Promise<void> {
+  // No-op for local use
+}
 
-  return result.length > 0 ? result[0] : undefined;
+export async function getUserByOpenId(): Promise<undefined> {
+  return undefined;
 }
 
 // ============================================
 // Conversion History Queries
 // ============================================
 
-/**
- * Create a new conversion record
- */
 export async function createConversion(conversion: InsertConversion): Promise<void> {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot create conversion: database not available");
-    return;
-  }
+  const db = loadDb();
 
-  await db.insert(conversions).values(conversion);
+  const newConversion: Conversion = {
+    id: db.nextId++,
+    conversionId: conversion.conversionId,
+    userId: conversion.userId ?? null,
+    filename: conversion.filename,
+    pdfKey: conversion.pdfKey ?? null,
+    pdfUrl: conversion.pdfUrl ?? null,
+    markdownKey: conversion.markdownKey ?? null,
+    markdownUrl: conversion.markdownUrl ?? null,
+    markdownContent: conversion.markdownContent ?? null,
+    status: conversion.status ?? "pending",
+    totalPages: conversion.totalPages ?? null,
+    figuresExtracted: conversion.figuresExtracted ?? null,
+    conversionMethod: conversion.conversionMethod ?? null,
+    fileSize: conversion.fileSize ?? null,
+    errorMessage: conversion.errorMessage ?? null,
+    images: conversion.images ?? null,
+    figureQuestionLinks: conversion.figureQuestionLinks ?? null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    completedAt: conversion.completedAt ?? null,
+  };
+
+  db.conversions.push(newConversion);
+  saveDb(db);
 }
 
-/**
- * Get a conversion by its unique conversionId
- */
 export async function getConversionById(conversionId: string): Promise<Conversion | undefined> {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get conversion: database not available");
-    return undefined;
-  }
-
-  const result = await db
-    .select()
-    .from(conversions)
-    .where(eq(conversions.conversionId, conversionId))
-    .limit(1);
-
-  return result.length > 0 ? result[0] : undefined;
+  const db = loadDb();
+  return db.conversions.find(c => c.conversionId === conversionId);
 }
 
-/**
- * Update a conversion record
- */
 export async function updateConversion(
   conversionId: string,
   updates: Partial<InsertConversion>
 ): Promise<void> {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot update conversion: database not available");
-    return;
-  }
+  const db = loadDb();
+  const index = db.conversions.findIndex(c => c.conversionId === conversionId);
 
-  await db
-    .update(conversions)
-    .set(updates)
-    .where(eq(conversions.conversionId, conversionId));
+  if (index !== -1) {
+    db.conversions[index] = {
+      ...db.conversions[index],
+      ...updates,
+      updatedAt: new Date(),
+    } as Conversion;
+    saveDb(db);
+  }
 }
 
-/**
- * Get conversion history for a user (or all public conversions if no userId)
- */
 export async function getConversionHistory(
   userId?: number,
   limit: number = 20,
   offset: number = 0
 ): Promise<Conversion[]> {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get conversion history: database not available");
-    return [];
-  }
+  const db = loadDb();
 
-  // If userId provided, get user's conversions; otherwise get anonymous conversions
-  const whereClause = userId 
-    ? eq(conversions.userId, userId)
-    : isNull(conversions.userId);
+  // Sort by createdAt descending
+  const sorted = [...db.conversions].sort(
+    (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+  );
 
-  const result = await db
-    .select()
-    .from(conversions)
-    .where(whereClause)
-    .orderBy(desc(conversions.createdAt))
-    .limit(limit)
-    .offset(offset);
-
-  return result;
+  return sorted.slice(offset, offset + limit);
 }
 
-/**
- * Get all conversions (for admin or public listing)
- */
 export async function getAllConversions(
   limit: number = 50,
   offset: number = 0
 ): Promise<Conversion[]> {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot get all conversions: database not available");
-    return [];
-  }
+  const db = loadDb();
 
-  const result = await db
-    .select()
-    .from(conversions)
-    .orderBy(desc(conversions.createdAt))
-    .limit(limit)
-    .offset(offset);
+  // Sort by createdAt descending
+  const sorted = [...db.conversions].sort(
+    (a, b) => b.createdAt.getTime() - a.createdAt.getTime()
+  );
 
-  return result;
+  return sorted.slice(offset, offset + limit);
 }
 
-/**
- * Delete a conversion by ID (for cleanup or user request)
- */
 export async function deleteConversion(conversionId: string): Promise<void> {
-  const db = await getDb();
-  if (!db) {
-    console.warn("[Database] Cannot delete conversion: database not available");
-    return;
-  }
-
-  await db.delete(conversions).where(eq(conversions.conversionId, conversionId));
+  const db = loadDb();
+  db.conversions = db.conversions.filter(c => c.conversionId !== conversionId);
+  saveDb(db);
 }
 
-/**
- * Count total conversions for a user
- */
 export async function countUserConversions(userId?: number): Promise<number> {
-  const db = await getDb();
-  if (!db) {
-    return 0;
-  }
-
-  const whereClause = userId 
-    ? eq(conversions.userId, userId)
-    : isNull(conversions.userId);
-
-  const result = await db
-    .select()
-    .from(conversions)
-    .where(whereClause);
-
-  return result.length;
+  const db = loadDb();
+  return db.conversions.length;
 }

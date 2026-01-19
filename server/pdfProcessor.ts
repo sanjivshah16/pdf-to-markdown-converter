@@ -158,9 +158,13 @@ async function executePythonConverter(
       actualScriptPath,
       pdfPath,
       "-o", outputDir,
-      "-m", "tesseract"
+      "-m", "docling"
     ], {
-      env: { ...process.env },
+      env: {
+        ...process.env,
+        // Fix OpenMP library conflict on macOS
+        KMP_DUPLICATE_LIB_OK: "TRUE",
+      },
       stdio: ['pipe', 'pipe', 'pipe']
     });
 
@@ -258,12 +262,26 @@ async function executePythonConverter(
           console.log(`[PDF Processor] Found ${imageFiles.length} image files`);
           
           for (const file of imageFiles) {
-            const pageMatch = file.match(/page(\d+)/);
+            // Match both figure_X_Y.png (Docling detected) and pageX_imgY.ext (PyMuPDF embedded)
+            const doclingMatch = file.match(/figure_(\d+)_(\d+)/);
+            const pymupdfMatch = file.match(/page(\d+)_img(\d+)/);
+
+            let pageNum = 0;
+            let figureType = "embedded_image";
+
+            if (doclingMatch) {
+              pageNum = parseInt(doclingMatch[1]);
+              figureType = "detected_figure";
+            } else if (pymupdfMatch) {
+              pageNum = parseInt(pymupdfMatch[1]);
+              figureType = "embedded_image";
+            }
+
             figures.push({
-              page: pageMatch ? parseInt(pageMatch[1]) : 0,
+              page: pageNum,
               filename: file,
               path: `${imagesDir}/${file}`,
-              type: file.includes("_full") ? "page_render" : "embedded_image"
+              type: file.includes("_full") ? "page_render" : figureType
             });
           }
         }
@@ -284,8 +302,8 @@ async function executePythonConverter(
           }
         }
 
-        // Count embedded images only
-        const embeddedFigures = figures.filter(f => f.type === "embedded_image");
+        // Count detected and embedded figures (not full page renders)
+        const embeddedFigures = figures.filter(f => f.type === "embedded_image" || f.type === "detected_figure");
 
         resolve({
           markdown,
@@ -318,8 +336,8 @@ async function uploadImagesToS3(
   const uploadedImages: ConversionResult["images"] = [];
   
   for (const figure of figures) {
-    // Only upload embedded images, not full page renders
-    if (figure.type !== "embedded_image") continue;
+    // Only upload detected figures and embedded images, not full page renders
+    if (figure.type !== "embedded_image" && figure.type !== "detected_figure") continue;
     
     try {
       const imagePath = figure.path;

@@ -4,13 +4,14 @@
  * Typography: Space Grotesk (headlines), IBM Plex Mono (technical)
  */
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useMemo } from "react";
 import { Button } from "@/components/ui/button";
-import { FileUp, FileText, Image, Download, Trash2, CheckCircle, AlertCircle, Loader2, Clock, Link2, Eye, Code } from "lucide-react";
+import { FileUp, FileText, Image, Download, Trash2, CheckCircle, AlertCircle, Loader2, Clock, Link2, Eye, Code, Archive, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
 import { Link } from "wouter";
 import { Streamdown } from "streamdown";
+import JSZip from "jszip";
 
 interface ConversionResult {
   conversionId: string;
@@ -51,7 +52,16 @@ export default function Home() {
       });
       setIsProcessing(false);
       setStatus({ stage: "complete", progress: 100, message: "Conversion complete!" });
-      toast.success("PDF converted successfully!");
+
+      // Show conversion method in toast
+      const isDocling = data.conversionMethod.toLowerCase().includes("docling");
+      toast.success(
+        `PDF converted successfully using ${isDocling ? "Docling" : "PyMuPDF + Tesseract"}!`,
+        {
+          icon: isDocling ? <Sparkles className="w-4 h-4" /> : undefined,
+          description: `${data.totalPages} pages, ${data.figuresExtracted} figures extracted`,
+        }
+      );
     },
     onError: (error) => {
       setIsProcessing(false);
@@ -105,7 +115,7 @@ export default function Home() {
     const stages = [
       { stage: "upload", progress: 10, message: "Uploading PDF..." },
       { stage: "extract", progress: 25, message: "Extracting pages..." },
-      { stage: "ocr", progress: 50, message: "Running Tesseract OCR..." },
+      { stage: "ocr", progress: 50, message: "Converting with Docling..." },
       { stage: "figures", progress: 70, message: "Extracting figures..." },
       { stage: "format", progress: 85, message: "Formatting markdown..." },
     ];
@@ -130,7 +140,7 @@ export default function Home() {
 
   const handleDownloadMarkdown = () => {
     if (!result) return;
-    
+
     const blob = new Blob([result.markdown], { type: "text/markdown" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -142,6 +152,91 @@ export default function Home() {
     URL.revokeObjectURL(url);
     toast.success("Markdown file downloaded!");
   };
+
+  const handleDownloadZip = async () => {
+    if (!result) return;
+
+    const zip = new JSZip();
+    const baseName = file?.name.replace('.pdf', '') || "converted";
+
+    // Add markdown file
+    zip.file(`${baseName}.md`, result.markdown);
+
+    // Create images folder and fetch images
+    const imagesFolder = zip.folder("images");
+
+    toast.info("Preparing ZIP file...", { duration: 2000 });
+
+    // Fetch and add all images
+    for (const img of result.images) {
+      try {
+        const response = await fetch(img.url);
+        const blob = await response.blob();
+        imagesFolder?.file(img.name, blob);
+      } catch (error) {
+        console.error(`Failed to fetch image ${img.name}:`, error);
+      }
+    }
+
+    // Generate and download ZIP
+    const zipBlob = await zip.generateAsync({ type: "blob" });
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${baseName}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast.success("ZIP file downloaded with markdown + images!");
+  };
+
+  // Process markdown to replace image paths with actual URLs for preview
+  const processedMarkdown = useMemo(() => {
+    if (!result) return "";
+
+    let md = result.markdown;
+
+    // Replace image references like ![...](images/filename.png) with actual URLs
+    for (const img of result.images) {
+      // Match various image markdown patterns
+      const patterns = [
+        new RegExp(`!\\[([^\\]]*)\\]\\(images/${img.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'g'),
+        new RegExp(`!\\[([^\\]]*)\\]\\(\\./images/${img.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\)`, 'g'),
+      ];
+
+      for (const pattern of patterns) {
+        md = md.replace(pattern, `![$1](${img.url})`);
+      }
+    }
+
+    // Also insert images at page breaks if they're not already in the text
+    // This helps show images inline with the content
+    const imagesByPage: Record<number, typeof result.images> = {};
+    for (const img of result.images) {
+      if (!imagesByPage[img.pageNumber]) {
+        imagesByPage[img.pageNumber] = [];
+      }
+      imagesByPage[img.pageNumber].push(img);
+    }
+
+    // Check if images are referenced in markdown, if not, add them at end of their page section
+    for (const img of result.images) {
+      if (!md.includes(img.url)) {
+        // Find the page section and append image after it
+        const pagePattern = new RegExp(`(## Page ${img.pageNumber}[\\s\\S]*?)(?=## Page \\d+|---\\s*\\n\\s*## Extracted Figures|$)`);
+        const match = md.match(pagePattern);
+        if (match) {
+          const pageContent = match[1];
+          const insertPoint = match.index! + pageContent.length;
+          const imageMarkdown = `\n\n![Figure from page ${img.pageNumber}](${img.url})\n`;
+          md = md.slice(0, insertPoint) + imageMarkdown + md.slice(insertPoint);
+        }
+      }
+    }
+
+    return md;
+  }, [result]);
 
   const handleClear = () => {
     setFile(null);
@@ -320,19 +415,25 @@ export default function Home() {
                 />
                 {result && (
                   <>
-                    <StatusItem 
-                      label="Pages" 
-                      value={result.totalPages.toString()} 
+                    <StatusItem
+                      label="Method"
+                      value={result.conversionMethod.includes("Docling") ? "Docling" : "PyMuPDF"}
+                      active
+                      success={result.conversionMethod.includes("Docling")}
+                    />
+                    <StatusItem
+                      label="Pages"
+                      value={result.totalPages.toString()}
                       active
                     />
-                    <StatusItem 
-                      label="Figures" 
-                      value={result.figuresExtracted.toString()} 
+                    <StatusItem
+                      label="Figures"
+                      value={result.figuresExtracted.toString()}
                       active
                     />
-                    <StatusItem 
-                      label="Links" 
-                      value={result.figureQuestionLinks.length.toString()} 
+                    <StatusItem
+                      label="Links"
+                      value={result.figureQuestionLinks.length.toString()}
                       active
                     />
                   </>
@@ -351,14 +452,37 @@ export default function Home() {
                 </h2>
 
                 <div className="space-y-4">
-                  {/* Download Markdown */}
-                  <Button
-                    onClick={handleDownloadMarkdown}
-                    className="w-full brutal-btn bg-primary text-primary-foreground hover:bg-[#E05A6D]"
-                  >
-                    <Download className="w-4 h-4 mr-2" />
-                    DOWNLOAD .MD
-                  </Button>
+                  {/* Conversion Method Badge */}
+                  <div className="flex items-center justify-center">
+                    <span className={`px-3 py-2 brutal-border text-sm font-mono font-semibold flex items-center gap-2 ${
+                      result.conversionMethod.toLowerCase().includes("docling")
+                        ? "bg-green-100 text-green-800 border-green-600"
+                        : "bg-blue-100 text-blue-800 border-blue-600"
+                    }`}>
+                      {result.conversionMethod.toLowerCase().includes("docling") && (
+                        <Sparkles className="w-4 h-4" />
+                      )}
+                      {result.conversionMethod}
+                    </span>
+                  </div>
+
+                  {/* Download Buttons */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      onClick={handleDownloadMarkdown}
+                      className="brutal-btn bg-primary text-primary-foreground hover:bg-[#E05A6D]"
+                    >
+                      <Download className="w-4 h-4 mr-1" />
+                      .MD
+                    </Button>
+                    <Button
+                      onClick={handleDownloadZip}
+                      className="brutal-btn bg-[#1A1A1A] text-[#F5F5F0] hover:bg-[#333]"
+                    >
+                      <Archive className="w-4 h-4 mr-1" />
+                      .ZIP
+                    </Button>
+                  </div>
 
                   {/* Figure-Question Links */}
                   {result.figureQuestionLinks.length > 0 && (
@@ -455,10 +579,10 @@ export default function Home() {
                 </div>
               </div>
               
-              <div className="bg-muted brutal-border p-4 max-h-[500px] overflow-auto">
+              <div className="bg-muted brutal-border p-4 max-h-[600px] overflow-auto">
                 {previewMode === "rendered" ? (
-                  <div className="prose prose-sm max-w-none prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-li:my-0">
-                    <Streamdown>{result.markdown}</Streamdown>
+                  <div className="prose prose-sm max-w-none prose-headings:font-bold prose-h1:text-2xl prose-h2:text-xl prose-h3:text-lg prose-p:my-2 prose-li:my-0 prose-img:my-4 prose-img:rounded-lg prose-img:border-2 prose-img:border-gray-300">
+                    <Streamdown>{processedMarkdown}</Streamdown>
                   </div>
                 ) : (
                   <pre className="font-mono text-sm whitespace-pre-wrap">{result.markdown}</pre>
